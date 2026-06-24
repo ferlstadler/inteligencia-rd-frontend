@@ -1,40 +1,44 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  FileText, 
-  Upload, 
-  Terminal, 
-  Search, 
-  Filter, 
-  Cpu, 
-  Users, 
-  ArrowRight, 
-  UserCheck, 
-  Calendar, 
-  Volume2, 
-  FileCheck, 
-  Sliders, 
-  Mail, 
-  HelpCircle, 
-  AlertTriangle, 
-  Layers, 
-  BarChart4, 
+import {
+  FileText,
+  Upload,
+  Terminal,
+  Search,
+  Filter,
+  Cpu,
+  Users,
+  ArrowRight,
+  UserCheck,
+  Calendar,
+  Volume2,
+  FileCheck,
+  Sliders,
+  Mail,
+  HelpCircle,
+  AlertTriangle,
+  Layers,
+  BarChart4,
   CheckCircle,
   Database,
   RefreshCw,
-  Send
+  Send,
+  Trash2,
+  Star,
+  FolderOpen,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
-import { Lead, BaseStatsSummary, ChatMessage, LifecycleStage } from './types';
+import { Lead, BaseStatsSummary, ChatMessage, LifecycleStage, FileMetadata } from './types';
 import { parseCSV, calculateStats, generateSampleCSV, checkMQL, checkBlockers, getLifecycleStage } from './utils/dataEngine';
 
 export default function App() {
-  const [csvRaw, setCsvRaw] = useState<string>('');
   const [leads, setLeads] = useState<Lead[]>([]);
   const [stats, setStats] = useState<BaseStatsSummary | null>(null);
   const [activeTab, setActiveTab] = useState<'funnel' | 'lifecycle' | 'audience' | 'email' | 'table'>('funnel');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedLifecycleFilter, setSelectedLifecycleFilter] = useState<string>('All');
   const [selectedMqlFilter, setSelectedMqlFilter] = useState<string>('All');
-  
+
   // Table pagination
   const [currentPage, setCurrentPage] = useState<number>(1);
   const itemsPerPage = 8;
@@ -47,14 +51,20 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputCommand, setInputCommand] = useState<string>('');
   const [isTyping, setIsTyping] = useState<boolean>(false);
-  
+
+  // Multi-file management states
+  const [fileList, setFileList] = useState<FileMetadata[]>([]);
+  const [activeFileId, setActiveFileId] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState('');
+  const [fileManagerOpen, setFileManagerOpen] = useState(false);
+
   const terminalEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Load sample database immediately on startup
   useEffect(() => {
     const sample = generateSampleCSV();
-    setCsvRaw(sample);
     const parsed = parseCSV(sample);
     setLeads(parsed);
     const calculatedStats = calculateStats(parsed);
@@ -71,7 +81,7 @@ export default function App() {
       {
         id: 'bootsign-2',
         sender: 'agent',
-        text: 'Carreguei uma base de alta fidelidade com 115 contatos de lead para você explorar o Lifecycle Marketing imediatamente. Você também pode arrastar ou carregar o seu próprio CSV de exportação do RD Station no botão superior ⚡.',
+        text: 'Carreguei uma base de alta fidelidade com 115 contatos de lead para você explorar o Lifecycle Marketing imediatamente. Use o botão "Importar CSV" para enviar sua base real ao servidor e alternár entre múltiplas bases.',
         timestamp: new Date().toLocaleTimeString('pt-BR')
       },
       {
@@ -83,8 +93,9 @@ export default function App() {
     ];
     setMessages(welcomeMsgs);
 
-    // Check backend config
+    // Check backend config and load file list
     checkApiStatus();
+    loadFileList();
   }, []);
 
   // Autoscroll chat terminal
@@ -98,6 +109,9 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setApiKeyConfigured(data.hasApiKey);
+        if (data.activeFileId) {
+          setActiveFileId(data.activeFileId);
+        }
       }
     } catch (e) {
       console.warn("Could not check backend API key status. Assuming fallback mode.");
@@ -106,33 +120,128 @@ export default function App() {
     }
   };
 
-  // CSV file uploader handler
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const text = event.target?.result as string;
-      if (text) {
-        setCsvRaw(text);
-        const parsed = parseCSV(text);
-        if (parsed.length === 0) {
-          addTerminalMessage('agent', '⚠️ ERRO: O arquivo carregado está vazio ou não pôde ser analisado como CSV válido.');
-          return;
-        }
-        setLeads(parsed);
-        const calculatedStats = calculateStats(parsed);
-        setStats(calculatedStats);
-        setCurrentPage(1);
-
-        addTerminalMessage('agent', `📂 BASE DETECTADA COM SUCESSO: ${parsed.length} leads importados. Novas estatísticas geradas.`);
+  const loadFileList = async () => {
+    try {
+      const res = await fetch('/api/files');
+      if (res.ok) {
+        const data = await res.json();
+        setFileList(data.files || []);
+        setActiveFileId(data.activeFileId);
       }
-    };
-    reader.readAsText(file);
+    } catch (e) {
+      console.warn("Could not load file list from backend.");
+    }
   };
 
-  // Drag and drop handles
+  // Switch active file: load stats and first rows
+  const switchToFile = async (id: string) => {
+    try {
+      // Activate on backend
+      await fetch(`/api/files/${id}/activate`, { method: 'PUT' });
+      setActiveFileId(id);
+
+      // Load stats
+      const statsRes = await fetch(`/api/files/${id}/stats`);
+      if (statsRes.ok) {
+        const statsData = await statsRes.json();
+        setStats(statsData);
+      }
+
+      // Load first rows for table
+      const rowsRes = await fetch(`/api/files/${id}/rows?maxRows=5000`);
+      if (rowsRes.ok) {
+        const rowsData = await rowsRes.json();
+        setLeads(rowsData.leads || []);
+        setCurrentPage(1);
+      }
+
+      // Update file list active state
+      setFileList(prev => prev.map(f => ({ ...f, isActive: f.id === id })));
+
+      const meta = fileList.find(f => f.id === id);
+      const name = meta?.name || 'base';
+      addTerminalMessage('agent', `📂 BASE ALTERNADA: '${name}' carregada com ${(meta?.rowCount || 0).toLocaleString('pt-BR')} leads. Estatísticas e tabela atualizadas.`);
+    } catch (e) {
+      console.error("Error switching file:", e);
+      addTerminalMessage('agent', '⚠️ ERRO ao alternar base. Tente novamente.');
+    }
+  };
+
+  const deleteFile = async (id: string) => {
+    const meta = fileList.find(f => f.id === id);
+    if (!window.confirm(`Remover a base '${meta?.name || id}' do servidor?`)) return;
+    try {
+      const res = await fetch(`/api/files/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        const data = await res.json();
+        setFileList(prev => prev.filter(f => f.id !== id));
+        setActiveFileId(data.activeFileId);
+        addTerminalMessage('agent', `🗑️ BASE REMOVIDA: '${meta?.name || id}' deletada do servidor.`);
+      }
+    } catch (e) {
+      console.error("Error deleting file:", e);
+    }
+  };
+
+  // Upload CSV to backend
+  const handleFileUpload = async (file: File) => {
+    if (!file) return;
+    setIsUploading(true);
+    setUploadProgress(`Enviando ${file.name}...`);
+
+    const formData = new FormData();
+    formData.append('csv', file);
+
+    try {
+      setUploadProgress('Processando e calculando estatísticas...');
+      const res = await fetch('/api/files/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      const newMeta: FileMetadata = { ...data.meta, isActive: true, stats: data.stats };
+
+      // Add to list, mark others as inactive
+      setFileList(prev => [...prev.map(f => ({ ...f, isActive: false })), newMeta]);
+      setActiveFileId(data.id);
+
+      // Load stats and rows from the new file
+      if (data.stats) {
+        setStats(data.stats);
+      }
+
+      // Fetch rows for table display
+      const rowsRes = await fetch(`/api/files/${data.id}/rows?maxRows=5000`);
+      if (rowsRes.ok) {
+        const rowsData = await rowsRes.json();
+        setLeads(rowsData.leads || []);
+        setCurrentPage(1);
+      }
+
+      const rowCount = data.meta?.rowCount || 0;
+      addTerminalMessage('agent', `✅ BASE '${file.name}' CARREGADA COM SUCESSO: ${rowCount.toLocaleString('pt-BR')} leads importados. Análise completa disponível.`);
+      setFileManagerOpen(true);
+    } catch (err: any) {
+      console.error("Upload error:", err);
+      addTerminalMessage('agent', `⚠️ ERRO no upload: ${err?.message || 'falha desconhecida'}`);
+    } finally {
+      setIsUploading(false);
+      setUploadProgress('');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleFileUpload(file);
+  };
+
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
   };
@@ -140,25 +249,8 @@ export default function App() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const file = e.dataTransfer.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const text = event.target?.result as string;
-        if (text) {
-          setCsvRaw(text);
-          const parsed = parseCSV(text);
-          if (parsed.length === 0) {
-            addTerminalMessage('agent', '⚠️ ERRO: Arquivo inválido.');
-            return;
-          }
-          setLeads(parsed);
-          const calculatedStats = calculateStats(parsed);
-          setStats(calculatedStats);
-          setCurrentPage(1);
-          addTerminalMessage('agent', `⚡ ARRASTO DE ARQUIVO DETECTADO: ${parsed.length} leads importados.`);
-        }
-      };
-      reader.readAsText(file);
+    if (file && file.name.endsWith('.csv')) {
+      handleFileUpload(file);
     }
   };
 
@@ -176,13 +268,12 @@ export default function App() {
   const handleQuery = async (promptText: string) => {
     if (!promptText.trim()) return;
 
-    // Save query
     addTerminalMessage('user', promptText);
     setInputCommand('');
     setIsTyping(true);
 
     try {
-      // Setup payload sending current stats summary context to Gemini
+      // Send current stats; backend also uses active file stats as fallback
       const statsPayload = stats ? stats : calculateStats(leads);
 
       const response = await fetch('/api/query', {
@@ -201,7 +292,6 @@ export default function App() {
       const data = await response.json();
 
       if (data.isFallback || !apiKeyConfigured) {
-        // Run locally generated robust data analytic response matches specs exactly
         setTimeout(() => {
           const fallbackResponse = computeLocalIntelligence(promptText, leads, statsPayload);
           addTerminalMessage('agent', fallbackResponse);
@@ -214,7 +304,6 @@ export default function App() {
 
     } catch (err) {
       console.error(err);
-      // Fail proof fallback
       setTimeout(() => {
         const fallbackResponse = computeLocalIntelligence(promptText, leads, stats ? stats : calculateStats(leads));
         addTerminalMessage('agent', "⚠️ [Aviso de Conectividade Local: Rodando Inteligência Local Integrada]\n\n" + fallbackResponse);
@@ -223,15 +312,13 @@ export default function App() {
     }
   };
 
-  // Highly robust local rule-based intelligence that returns beautiful exact statistics matching the user rules
+  // Highly robust local rule-based intelligence
   const computeLocalIntelligence = (prompt: string, currentLeads: Lead[], summary: BaseStatsSummary): string => {
     const lowerPrompt = prompt.toLowerCase();
 
-    // 1. QUESTION: Distribuição de ciclo de vida
     if (lowerPrompt.includes('ciclo de vida') || lowerPrompt.includes('saúde da base') || lowerPrompt.includes('saude')) {
       const l = summary.lifecycle;
       const total = currentLeads.length;
-      
       const pAtivo = ((l.ativo / total) * 100).toFixed(1);
       const pEngajado = ((l.engajado / total) * 100).toFixed(1);
       const pDormindo = ((l.dormindo / total) * 100).toFixed(1);
@@ -247,14 +334,13 @@ export default function App() {
 • 🔴 **Inativos (91-180 dias)**: ${l.inativo} contatos (${pInativo}%)
 • ⚫ **Perdidos (> 180 dias ou nulo)**: ${l.perdido} contatos (${pPerdido}%)
 
-💡 **O insight por trás do número**: 
+💡 **O insight por trás do número**:
 Mais de ${((l.dormindo + l.frio + l.inativo + l.perdido) / total * 100).toFixed(0)}% da base acumulada está atualmente acima de 30 dias sem nova conversão ou visita. Isso indica que a base esfria rapidamente após o cadastro inicial. Temos fit disponível, mas falta régua de aquecimento automatizada de longo prazo.
 
 ⚡ **Uma sugestão de próxima ação concreta**:
 Crie um segmento no RD Station chamado **"Recuperação de Oportunidades Dormentes"** filtrando contatos em estágio 'Dormindo/Frio' (última atividade entre 31 e 90 dias) que possuem score de produto > 50. Dispare hoje uma campanha de conteúdo prático / case de cliente do setor correspondente para re-engajar esses contatos antes que caiam em Perdido.`;
     }
 
-    // 2. QUESTION: Prontos para Vendas / MQLs por produto
     if (lowerPrompt.includes('vendas') || lowerPrompt.includes('prontos') || lowerPrompt.includes('mql') || lowerPrompt.includes('mqls')) {
       const m = summary.funnel.mqls;
       const total = currentLeads.length;
@@ -263,7 +349,6 @@ Crie um segmento no RD Station chamado **"Recuperação de Oportunidades Dorment
         const stage = getLifecycleStage(l, '2026-05-27');
         return isM && (stage === 'Ativo' || stage === 'Engajado');
       }).length;
-
       const pSDR = ((activeAndEngagedMQLs / (m.total || 1)) * 100).toFixed(0);
 
       return `📊 Contabilizados **${m.total} MQLs qualificados** prontos para passagem comercial (score > 60 em pelo menos uma categoria, e-mail autorizado e sem bloqueios ativos).
@@ -274,19 +359,15 @@ Distribuição por produto:
 • 💬 **Conversas**: ${m.conversas} leads qualificados
 • 📦 **Multi-produto**: ${m.multiProduto} leads qualificados
 
-💡 **O insight por trás do número**: 
+💡 **O insight por trás do número**:
 Desses ${m.total} leads ideais, apenas **${activeAndEngagedMQLs} (${pSDR}%)** estão no ciclo de atividade 'Ativo' ou 'Engajado'. Os outros já estão dormentes ou frios, o que significa que o time de vendas vai ligar para leads que esqueceram que converteram recentemente. A janela quente de conversão está aberta agora para somente ${pSDR}% da lista estruturada.
 
 ⚡ **Uma sugestão de próxima ação concreta**:
 Abra o RD Station, faça a exportação imediata de leads com filtro de score > 60 e que visitaram ou converteram nos últimos 15 dias (estágio Ativo). Distribua esses contatos manualmente nas primeiras posições de SDRs agora para abordagem com discurso personalizado focado no produto correspondente.`;
     }
 
-    // 3. QUESTION: Bloqueios ativos na base
     if (lowerPrompt.includes('bloqueio') || lowerPrompt.includes('bloqueado') || lowerPrompt.includes('impedem')) {
       const b = summary.funnel.blocked;
-      const total = currentLeads.length;
-      
-      // Sort blockers to find most common
       const bList = [
         { name: 'Opt-out (is_available_for_mailing = FALSE)', count: b.notAvailableForMailing },
         { name: 'Nome de contato vazio', count: b.emptyName },
@@ -314,7 +395,6 @@ Muitas vezes, atribuímos um volume de leads menor para vendas por causa de rest
 Para os contatos ideais bloqueados com nome vazio, configure um enriquecimento inteligente ou adicione um campo progressivo obrigatório de "Nome Completo" em materiais ricos futuros. Faça um split de teste no RD Station para leads com size factor 1 excluindo-os de vendas diretas, mas direcionando no CRM para fluxos de auto-atendimento de menor custo de CAC.`;
     }
 
-    // 4. QUESTION: Scores altos dormindo (oportunidade perdida)
     if (lowerPrompt.includes('frio') || lowerPrompt.includes('alto') || lowerPrompt.includes('dormente') || lowerPrompt.includes('perdida')) {
       const coldHighScoreCount = currentLeads.filter(l => {
         const hasScore = l.entry_level_score > 60 || l.premium_score > 60 || l.crm_score > 60 || l.conversational_score > 60;
@@ -333,7 +413,6 @@ Isso representa um vazamento direto de receita no pipeline de marketing. Investi
 Crie imediatamente no RD Station uma régua de marketing específica chamada **"Reaquecimento High Score"**. Dispare um convite assinado pelo VP de Vendas da RD para uma demonstração exclusiva de 15 minutos do produto em que o lead tem o maior score. Essa abordagem mais pessoal tem taxas médias de abertura 4x maiores em bases dormentes.`;
     }
 
-    // 5. QUESTION: Quem nunca recebeu e-mail
     if (lowerPrompt.includes('nunca') || lowerPrompt.includes('e-mail') || lowerPrompt.includes('sem receber') || lowerPrompt.includes('engajamento')) {
       const neverEmailHighScore = summary.engagement.neverReceivedWithHighScore;
       const averageOpen = (summary.engagement.avgOpenRate * 100).toFixed(1);
@@ -349,7 +428,6 @@ A taxa média de abertura geral dos e-mails disparados para o restante da base d
 Verifique os fluxos de nutrição de entrada no RD Marketing e certifique-se de que não haja filtros de tags excludentes genéricos que estejam retendo lead scoring alto. Configure um disparo emergencial focado nesses leads contendo o kit de templates mais baixado do produto correspondente à sua maior pontuação.`;
     }
 
-    // 6. QUESTION: Leads de origem Hand Raiser ou Trial que não evoluíram
     if (lowerPrompt.includes('origem') || lowerPrompt.includes('trial') || lowerPrompt.includes('hand raiser') || lowerPrompt.includes('stuck') || lowerPrompt.includes('encontrado')) {
       const stuckCount = summary.engagement.neverEvolvedHandRaiserTrial;
 
@@ -363,42 +441,36 @@ Esse grupo representa o lead de maior valor absoluto da base de leads de Lifecyc
 Extraia estes leads que preencheram levantada de mão, cruze as informações com a ferramenta de CRM do RD Station para auditar se houve tentativa real de ligação e configure um fluxo de repescagem com o gancho: *"Identificamos que você tentou testar/falar conosco recentemente. Como podemos facilitar seu atendimento hoje?"* enviando para canal direto de WhatsApp.`;
     }
 
-    // General Answer fallback
-    return `📊 Análise consolidada sobre a base deleads (${currentLeads.length} registros ativos):
+    return `📊 Análise consolidada sobre a base de leads (${currentLeads.length} registros ativos):
 • Leads MQL Atuais: ${summary.funnel.mqls.total} qualificados
 • Leads classificados como Decisores: ${summary.persona.decisores} contatos (${((summary.persona.decisores / currentLeads.length) * 100).toFixed(0)}%)
 • Estado Ativos / Engajados na base: ${((summary.lifecycle.ativo + summary.lifecycle.engajado) / currentLeads.length * 100).toFixed(0)}%
 
-💡 **O insight por trás do número**: 
+💡 **O insight por trás do número**:
 Sua base apresenta alta aderência de fit (decisores executivos representam fatia significativa de ${((summary.persona.decisores / currentLeads.length) * 100).toFixed(0)}%), o que demonstra maturidade no tráfego de atração e qualidade. No entanto, o tempo de inatividade prolongado dilui o potencial e diminui a retenção desses leads que poderiam virar oportunidades comerciais no CRM.
 
 ⚡ **Uma sugestão de próxima ação concreta**:
 Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e insights de marketing focado na persona de decisores (Diretor, CEO, VP). Melhore a taxa de conversão adicionando botões explícitos e de fácil clique para "Testar CRM Gratuitamente" ou "Conectar com Especialista de WhatsApp".`;
   };
 
-  // Quick prompt buttons triggers
   const triggerQuickQuestion = (question: string) => {
     handleQuery(question);
   };
 
-  // Pagination filters computed listed leads
   const filteredLeads = leads.filter(lead => {
-    // Search
     const searchLow = searchQuery.toLowerCase();
-    const matchesSearch = 
+    const matchesSearch =
       lead.contact_name.toLowerCase().includes(searchLow) ||
       lead.contact_job_title.toLowerCase().includes(searchLow) ||
       lead.contact_origin.toLowerCase().includes(searchLow) ||
       lead.contact_uuid.toLowerCase().includes(searchLow);
-    
-    // Lifecycle Filter
+
     const stage = getLifecycleStage(lead, '2026-05-27');
     const matchesLifecycle = selectedLifecycleFilter === 'All' || stage === selectedLifecycleFilter;
 
-    // MQL filter
     const mqlInfo = checkMQL(lead);
-    const matchesMql = selectedMqlFilter === 'All' || 
-      (selectedMqlFilter === 'MQL' && mqlInfo.isMQL) || 
+    const matchesMql = selectedMqlFilter === 'All' ||
+      (selectedMqlFilter === 'MQL' && mqlInfo.isMQL) ||
       (selectedMqlFilter === 'Blocked' && !mqlInfo.isMQL && checkBlockers(lead).isBlocked) ||
       (selectedMqlFilter === 'NotMQL' && !mqlInfo.isMQL && !checkBlockers(lead).isBlocked);
 
@@ -416,6 +488,14 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
     }
   };
 
+  const formatBytes = (bytes: number): string => {
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  };
+
+  const activeFileMeta = fileList.find(f => f.id === activeFileId);
+
   return (
     <div className="bg-[#0a0c10] text-slate-300 font-sans min-h-screen flex flex-col overflow-x-hidden selection:bg-orange-500/35 selection:text-white" onDragOver={handleDragOver} onDrop={handleDrop}>
       {/* Top Header Rail */}
@@ -427,18 +507,17 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
               Agente de Inteligência de Base // Lifecycle Marketing
             </h1>
             <p className="text-[10px] text-slate-500 font-mono mt-0.5">
-              RD station lead database analysis terminal v1.4
+              RD station lead database analysis terminal v2.0 — multi-base
             </p>
           </div>
         </div>
-        
+
         {/* Quick controls and actions */}
         <div className="flex flex-wrap items-center gap-3 text-xs">
-          <button 
+          <button
             id="btn-load-sample"
             onClick={() => {
               const sample = generateSampleCSV();
-              setCsvRaw(sample);
               const parsed = parseCSV(sample);
               setLeads(parsed);
               const calculatedStats = calculateStats(parsed);
@@ -453,21 +532,22 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
             Base Modelo Pro
           </button>
 
-          <button 
+          <button
             id="btn-upload-trigger"
             onClick={() => fileInputRef.current?.click()}
-            className="px-3 py-1.5 bg-orange-600 hover:bg-orange-500 text-white rounded font-mono font-bold transition text-[11px] flex items-center gap-1.5 cursor-pointer shadow-[0_0_10px_rgba(234,88,12,0.2)]"
+            disabled={isUploading}
+            className="px-3 py-1.5 bg-orange-600 hover:bg-orange-500 disabled:opacity-60 text-white rounded font-mono font-bold transition text-[11px] flex items-center gap-1.5 cursor-pointer shadow-[0_0_10px_rgba(234,88,12,0.2)]"
           >
             <Upload size={12} />
-            Importar CSV Leads
+            {isUploading ? uploadProgress || 'Enviando...' : 'Importar CSV Leads'}
           </button>
-          
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            onChange={handleFileUpload} 
-            accept=".csv" 
-            className="hidden" 
+
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileInputChange}
+            accept=".csv"
+            className="hidden"
           />
 
           <div className="hidden sm:flex gap-4 text-[10px] font-mono text-slate-500 uppercase ml-2 border-l border-slate-800 pl-4">
@@ -477,12 +557,100 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
         </div>
       </header>
 
+      {/* File Manager Panel */}
+      <div className="border-b border-slate-800 bg-[#0d1117]/80">
+        <button
+          onClick={() => setFileManagerOpen(v => !v)}
+          className="w-full flex items-center justify-between px-6 py-2 text-[11px] font-mono text-slate-400 hover:text-slate-200 hover:bg-slate-900/40 transition cursor-pointer"
+        >
+          <span className="flex items-center gap-2">
+            <FolderOpen size={13} className="text-orange-500/70" />
+            <span className="uppercase tracking-wider font-bold">Gerenciador de Bases</span>
+            {fileList.length > 0 && (
+              <span className="bg-slate-800 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded text-[10px]">
+                {fileList.length} {fileList.length === 1 ? 'base' : 'bases'}
+              </span>
+            )}
+            {activeFileMeta && (
+              <span className="text-slate-500 truncate max-w-[200px]">
+                — ativa: <span className="text-orange-400">{activeFileMeta.name}</span>
+              </span>
+            )}
+          </span>
+          {fileManagerOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+        </button>
+
+        {fileManagerOpen && (
+          <div className="px-6 pb-4 pt-1">
+            {fileList.length === 0 ? (
+              <p className="text-[11px] font-mono text-slate-500 py-2">
+                Nenhuma base registrada no servidor. Use "Importar CSV Leads" para enviar seu primeiro arquivo.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {fileList.map(file => (
+                  <div
+                    key={file.id}
+                    className={`flex items-center justify-between gap-4 px-4 py-2.5 rounded-lg border transition ${
+                      file.id === activeFileId
+                        ? 'bg-orange-950/20 border-orange-500/30'
+                        : 'bg-[#161b22] border-slate-800 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      {file.id === activeFileId ? (
+                        <span className="text-[9px] font-mono font-bold text-orange-400 bg-orange-950/60 border border-orange-800/50 px-1.5 py-0.5 rounded shrink-0">
+                          ATIVA
+                        </span>
+                      ) : (
+                        <span className="text-[9px] font-mono text-slate-600 bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded shrink-0">
+                          —
+                        </span>
+                      )}
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-mono font-semibold text-slate-200 truncate max-w-[280px]" title={file.name}>
+                          {file.name}
+                        </div>
+                        <div className="text-[10px] font-mono text-slate-500 flex items-center gap-2 mt-0.5">
+                          <span>{file.rowCount.toLocaleString('pt-BR')} leads</span>
+                          <span>·</span>
+                          <span>{formatBytes(file.sizeBytes)}</span>
+                          <span>·</span>
+                          <span>{new Date(file.uploadedAt).toLocaleDateString('pt-BR')}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {file.id !== activeFileId && (
+                        <button
+                          onClick={() => switchToFile(file.id)}
+                          className="px-2.5 py-1 text-[10px] font-mono bg-slate-900 border border-slate-700 hover:border-orange-500 hover:text-orange-400 text-slate-300 rounded transition cursor-pointer"
+                        >
+                          Ativar
+                        </button>
+                      )}
+                      <button
+                        onClick={() => deleteFile(file.id)}
+                        className="p-1 text-slate-600 hover:text-red-400 transition cursor-pointer rounded"
+                        title="Remover base"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* Main Container Layout */}
       <main className="flex-1 p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start max-w-[1700px] mx-auto w-full">
-        
+
         {/* Left Column: Metrics and Interactive Stats Tabs (8 cols) */}
         <section className="lg:col-span-8 flex flex-col gap-6 w-full">
-          
+
           {/* Diagnostic Metrics Row */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="bg-[#161b22] border border-slate-800 p-4 rounded-lg shadow-inner relative overflow-hidden group hover:border-slate-700 transition">
@@ -490,7 +658,7 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                 <Database size={16} />
               </div>
               <div className="text-[10px] text-slate-500 uppercase mb-1 font-bold font-mono">Total Base</div>
-              <div className="text-2xl font-mono text-slate-100 font-bold">{leads.length}</div>
+              <div className="text-2xl font-mono text-slate-100 font-bold">{leads.length.toLocaleString('pt-BR')}</div>
               <div className="text-[9px] text-slate-400 font-mono mt-1">leads carregados</div>
             </div>
 
@@ -500,7 +668,7 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
               </div>
               <div className="text-[10px] text-orange-500/90 uppercase mb-1 font-bold font-mono">MQLs Potenciais</div>
               <div className="text-2xl font-mono text-orange-400 font-bold">
-                {stats?.funnel.mqls.total ?? 0}
+                {(stats?.funnel.mqls.total ?? 0).toLocaleString('pt-BR')}
               </div>
               <div className="text-[9px] text-[#33DB95] font-mono mt-1">
                 {leads.length > 0 ? (((stats?.funnel.mqls.total ?? 0) / leads.length) * 100).toFixed(0) : 0}% de conversão fit
@@ -513,7 +681,7 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
               </div>
               <div className="text-[10px] text-emerald-500/90 uppercase mb-1 font-bold font-mono">Ativos (15d)</div>
               <div className="text-2xl font-mono text-emerald-400 font-bold">
-                {stats?.lifecycle.ativo ?? 0}
+                {(stats?.lifecycle.ativo ?? 0).toLocaleString('pt-BR')}
               </div>
               <div className="text-[9px] text-emerald-500/70 font-mono mt-1">engajamento quente</div>
             </div>
@@ -524,7 +692,7 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
               </div>
               <div className="text-[10px] text-blue-500/95 uppercase mb-1 font-bold font-mono">Oportunidades (CRM)</div>
               <div className="text-2xl font-mono text-blue-400 font-bold">
-                {stats?.funnel.opps ?? 0}
+                {(stats?.funnel.opps ?? 0).toLocaleString('pt-BR')}
               </div>
               <div className="text-[9px] text-blue-500/70 font-mono mt-1">em negociação ativa</div>
             </div>
@@ -539,43 +707,43 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                   Painel de Inteligência Operacional RD Station
                 </h2>
               </div>
-              
+
               {/* Tab Selector */}
               <div className="flex flex-wrap gap-1 bg-slate-900/60 p-1 rounded-lg border border-slate-800 text-[11px] font-mono select-none">
-                <button 
+                <button
                   id="tab-funnel"
                   onClick={() => setActiveTab('funnel')}
                   className={`px-2.5 py-1 rounded transition cursor-pointer ${activeTab === 'funnel' ? 'bg-[#161b22] text-orange-400 border border-slate-800' : 'text-slate-400 hover:text-slate-200'}`}
                 >
                   Funil MQL
                 </button>
-                <button 
+                <button
                   id="tab-lifecycle"
                   onClick={() => setActiveTab('lifecycle')}
                   className={`px-2.5 py-1 rounded transition cursor-pointer ${activeTab === 'lifecycle' ? 'bg-[#161b22] text-orange-400 border border-slate-800' : 'text-slate-400 hover:text-slate-200'}`}
                 >
                   Ciclo de Vida
                 </button>
-                <button 
+                <button
                   id="tab-audience"
                   onClick={() => setActiveTab('audience')}
                   className={`px-2.5 py-1 rounded transition cursor-pointer ${activeTab === 'audience' ? 'bg-[#161b22] text-orange-400 border border-slate-800' : 'text-slate-400 hover:text-slate-200'}`}
                 >
                   Personas & Fit
                 </button>
-                <button 
+                <button
                   id="tab-email"
                   onClick={() => setActiveTab('email')}
                   className={`px-2.5 py-1 rounded transition cursor-pointer ${activeTab === 'email' ? 'bg-[#161b22] text-orange-400 border border-slate-800' : 'text-slate-400 hover:text-slate-200'}`}
                 >
                   Auditoria de E-mail
                 </button>
-                <button 
+                <button
                   id="tab-table"
                   onClick={() => setActiveTab('table')}
                   className={`px-2.5 py-1 rounded transition cursor-pointer ${activeTab === 'table' ? 'bg-[#161b22] text-orange-400 border border-slate-800' : 'text-slate-400 hover:text-slate-200'}`}
                 >
-                  Explorer ({leads.length})
+                  Explorer ({leads.length.toLocaleString('pt-BR')})
                 </button>
               </div>
             </div>
@@ -593,11 +761,9 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                   </p>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-                    {/* Left: Product distribution list */}
                     <div className="bg-[#161b22] border border-slate-800 rounded-lg p-4 space-y-4">
                       <h4 className="text-[11px] font-mono text-slate-400 uppercase tracking-wider border-b border-slate-800 pb-2">Distribuição por Categoria</h4>
-                      
-                      {/* Entry score item */}
+
                       <div className="space-y-1">
                         <div className="flex justify-between text-xs font-mono">
                           <span className="text-slate-300">MKT Entrada</span>
@@ -608,7 +774,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                         </div>
                       </div>
 
-                      {/* Pro score item */}
                       <div className="space-y-1">
                         <div className="flex justify-between text-xs font-mono">
                           <span className="text-slate-300">MKT Pro</span>
@@ -619,7 +784,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                         </div>
                       </div>
 
-                      {/* CRM score item */}
                       <div className="space-y-1">
                         <div className="flex justify-between text-xs font-mono">
                           <span className="text-slate-300">CRM de Vendas</span>
@@ -630,7 +794,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                         </div>
                       </div>
 
-                      {/* Conversas score item */}
                       <div className="space-y-1">
                         <div className="flex justify-between text-xs font-mono">
                           <span className="text-slate-300">Conversas inteligente</span>
@@ -641,7 +804,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                         </div>
                       </div>
 
-                      {/* Multi score item */}
                       <div className="space-y-1 text-slate-400">
                         <div className="flex justify-between text-xs font-mono">
                           <span className="text-slate-300">Multi-produto (Alto Fit Geral)</span>
@@ -653,7 +815,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                       </div>
                     </div>
 
-                    {/* Right: Blocker stats */}
                     <div className="bg-[#161b22] border border-slate-800 rounded-lg p-4 space-y-3">
                       <h4 className="text-[11px] font-mono text-red-400 uppercase tracking-wider border-b border-slate-800 pb-2 flex items-center justify-between">
                         <span>Filtros Governança de Base</span>
@@ -707,7 +868,7 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                       Para saber exatamente quantos contatos estão aptos para SDR sem receber bloqueios e qualificados, dispare a pergunta rápida de automação lateral em nosso terminal clínico.
                     </p>
                   </div>
-                  <button 
+                  <button
                     onClick={() => triggerQuickQuestion("Quantos leads estão prontos para vendas?")}
                     className="px-3 py-1.5 bg-[#0a0c10] hover:bg-orange-600/20 text-slate-200 hover:text-white border border-slate-800 rounded font-mono text-[11px] transition shrink-0 cursor-pointer"
                   >
@@ -730,8 +891,7 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                   </p>
 
                   <div className="bg-[#161b22] border border-slate-800 rounded-lg p-5 flex flex-col justify-around flex-grow space-y-5 max-w-3xl">
-                    
-                    {/* Active */}
+
                     <div className="space-y-1">
                       <div className="flex justify-between text-[11px] font-mono">
                         <span className="text-slate-300 font-bold flex items-center gap-1.5">
@@ -745,7 +905,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                       </div>
                     </div>
 
-                    {/* Engaged */}
                     <div className="space-y-1">
                       <div className="flex justify-between text-[11px] font-mono">
                         <span className="text-slate-300 font-bold flex items-center gap-1.5">
@@ -759,7 +918,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                       </div>
                     </div>
 
-                    {/* Dormindo */}
                     <div className="space-y-1">
                       <div className="flex justify-between text-[11px] font-mono">
                         <span className="text-slate-300 font-bold flex items-center gap-1.5">
@@ -773,7 +931,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                       </div>
                     </div>
 
-                    {/* Frio */}
                     <div className="space-y-1">
                       <div className="flex justify-between text-[11px] font-mono">
                         <span className="text-slate-300 font-bold flex items-center gap-1.5">
@@ -787,7 +944,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                       </div>
                     </div>
 
-                    {/* Inativo */}
                     <div className="space-y-1">
                       <div className="flex justify-between text-[11px] font-mono">
                         <span className="text-slate-300 font-bold flex items-center gap-1.5">
@@ -801,7 +957,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                       </div>
                     </div>
 
-                    {/* Perdido */}
                     <div className="space-y-1">
                       <div className="flex justify-between text-[11px] font-mono text-slate-500">
                         <span className="font-bold flex items-center gap-1.5">
@@ -839,10 +994,9 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                   </p>
 
                   <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-                    {/* Radial stats for Decisores / Nao decisores */}
                     <div className="md:col-span-4 bg-[#161b22] border border-slate-800 rounded-lg p-4 flex flex-col justify-center items-center text-center">
                       <span className="text-slate-400 text-xs font-mono uppercase font-bold mb-4">Maturidade da Base (ICP)</span>
-                      
+
                       <div className="relative w-28 h-28 flex items-center justify-center rounded-full border-4 border-slate-800">
                         <div className="text-center">
                           <span className="text-3xl font-mono text-emerald-400 font-bold mb-0.5 block">
@@ -864,7 +1018,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                       </div>
                     </div>
 
-                    {/* Top cargos / Top Origens / Top Segmentos lists */}
                     <div className="md:col-span-8 grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div className="bg-[#161b22] border border-slate-800 rounded-lg p-4 font-mono">
                         <span className="text-[10px] text-orange-400/80 uppercase font-bold tracking-wider block mb-3 pb-1 border-b border-slate-800">Cargos Dominantes</span>
@@ -921,7 +1074,7 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                     <div className="bg-[#161b22] border border-slate-800 rounded-lg p-5 space-y-4">
                       <span className="text-xs font-mono uppercase font-bold text-slate-400 tracking-wider block border-b border-slate-800 pb-2">Estatísticas Gerais de Abertura</span>
-                      
+
                       <div className="grid grid-cols-2 gap-4">
                         <div className="bg-[#0d1117] p-3 rounded border border-slate-850 text-center">
                           <span className="text-[10px] font-mono text-slate-500 uppercase block mb-1">Taxa Média Abertura</span>
@@ -989,13 +1142,13 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                     </p>
                   </div>
                   <div className="flex gap-2">
-                    <button 
+                    <button
                       onClick={() => triggerQuickQuestion("Leads com score alto e nunca receberam e-mail de marketing?")}
                       className="px-3 py-1.5 bg-[#0a0c10] hover:bg-orange-600/20 text-slate-200 hover:text-white border border-slate-800 rounded font-mono text-[11px] transition cursor-pointer"
                     >
                       Auditar Sem Envio
                     </button>
-                    <button 
+                    <button
                       onClick={() => triggerQuickQuestion("Leads com origem Hand Raiser ou Trial que não evoluíram?")}
                       className="px-3 py-1.5 bg-[#0a0c10] hover:bg-orange-600/20 text-slate-200 hover:text-white border border-slate-800 rounded font-mono text-[11px] transition cursor-pointer"
                     >
@@ -1009,14 +1162,12 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
             {/* TAB CONTENT 5: LEADS EXPLORER DATABASE TABLE */}
             {activeTab === 'table' && (
               <div className="space-y-4 flex-grow flex flex-col justify-between">
-                
-                {/* Filters Row */}
+
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-3 bg-slate-900/60 p-3 rounded-lg border border-slate-800 text-xs font-mono">
-                  
-                  {/* Search */}
+
                   <div className="md:col-span-5 relative">
                     <Search size={14} className="absolute left-2.5 top-2.5 text-slate-500" />
-                    <input 
+                    <input
                       type="text"
                       placeholder="Filtrar por nome, cargo ou origem..."
                       value={searchQuery}
@@ -1028,7 +1179,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                     />
                   </div>
 
-                  {/* Lifecycle Filter dropdown */}
                   <div className="md:col-span-3 flex items-center gap-1.5">
                     <span className="text-[10px] text-slate-500">Status:</span>
                     <select
@@ -1049,7 +1199,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                     </select>
                   </div>
 
-                  {/* MQL state filter */}
                   <div className="md:col-span-4 flex items-center gap-1.5">
                     <span className="text-[10px] text-slate-500">Filtro:</span>
                     <select
@@ -1068,7 +1217,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                   </div>
                 </div>
 
-                {/* Database leads results table list */}
                 <div className="flex-1 overflow-x-auto border border-slate-800 rounded-lg bg-[#0a0c10]">
                   <table className="w-full text-left font-mono text-[11px] select-text">
                     <thead className="bg-[#161b22] text-slate-400 border-b border-slate-800 sticky top-0 uppercase tracking-tighter">
@@ -1094,8 +1242,7 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                         currentLeadsToDisplay.map((lead, idx) => {
                           const mqlInfo = checkMQL(lead);
                           const lifeStage = getLifecycleStage(lead, '2026-05-27');
-                          
-                          // badge styling
+
                           let mqlBadge = <span className="text-slate-600">⚪</span>;
                           if (mqlInfo.isMQL) {
                             mqlBadge = <span className="text-emerald-400 font-bold" title={`MQL por fit em '${mqlInfo.product}'`}>🟢 MQL</span>;
@@ -1138,14 +1285,13 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                   </table>
                 </div>
 
-                {/* Pagination Controls */}
                 <div className="flex justify-between items-center text-xs font-mono select-none px-1">
                   <span className="text-slate-500">
-                    Exibindo contatos {filteredLeads.length > 0 ? indexOfFirstItem + 1 : 0} a {Math.min(indexOfLastItem, filteredLeads.length)} de a {filteredLeads.length} leads correspondentes.
+                    Exibindo contatos {filteredLeads.length > 0 ? indexOfFirstItem + 1 : 0} a {Math.min(indexOfLastItem, filteredLeads.length)} de {filteredLeads.length} leads correspondentes.
                   </span>
-                  
+
                   <div className="flex gap-1">
-                    <button 
+                    <button
                       onClick={() => paginate(currentPage - 1)}
                       disabled={currentPage === 1}
                       className="px-2 py-1 border border-slate-800 bg-[#161b22] hover:bg-[#1f242c] text-slate-300 rounded disabled:opacity-30 disabled:hover:bg-[#161b22] cursor-pointer"
@@ -1155,7 +1301,7 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                     <span className="px-3 py-1 bg-slate-900 border border-slate-800 text-slate-300 rounded">
                       Página {currentPage} de {Math.max(totalPages, 1)}
                     </span>
-                    <button 
+                    <button
                       onClick={() => paginate(currentPage + 1)}
                       disabled={currentPage === totalPages || totalPages === 0}
                       className="px-2 py-1 border border-slate-800 bg-[#161b22] hover:bg-[#1f242c] text-slate-300 rounded disabled:opacity-30 disabled:hover:bg-[#161b22] cursor-pointer"
@@ -1173,8 +1319,7 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
         {/* Right Column: AI terminal query workspace (4 cols) */}
         <section className="lg:col-span-4 flex flex-col gap-6 w-full">
           <div className="bg-[#1c2128] border border-orange-500/25 rounded-xl p-5 lg:p-6 flex flex-col min-h-[610px] shadow-[0_0_25px_rgba(249,115,22,0.06)] relative overflow-hidden">
-            
-            {/* Header branding info */}
+
             <div className="mb-4">
               <div className="flex justify-between items-center text-[10px] font-mono mb-2">
                 <span className="text-orange-500 font-bold uppercase tracking-wider flex items-center gap-1.5">
@@ -1186,43 +1331,42 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
               <div className="h-px w-full bg-gradient-to-r from-orange-500/50 via-orange-500/20 to-transparent"></div>
             </div>
 
-            {/* Quick Playbook Questions Automation Panel */}
             <div className="mb-4">
               <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest block mb-2 font-bold select-none text-right">
                 Perguntas do Playbook RD Station:
               </span>
               <div className="flex flex-col gap-2 font-mono scroll-py-2 max-h-36 overflow-y-auto">
-                <button 
+                <button
                   onClick={() => triggerQuickQuestion("Como está o ciclo de vida da base?")}
                   className="w-full text-[10px] py-1.5 px-2 bg-[#0d1117] text-left text-slate-300 hover:text-white border border-slate-800 hover:border-orange-500/50 rounded transition truncate cursor-pointer text-ellipsis block"
                 >
                   ⚡ Saúde de Ciclo de Vida da Base
                 </button>
-                <button 
+                <button
                   onClick={() => triggerQuickQuestion("Quantos leads estão prontos para vendas?")}
                   className="w-full text-[10px] py-1.5 px-2 bg-[#0d1117] text-left text-slate-300 hover:text-white border border-slate-800 hover:border-orange-500/50 rounded transition truncate cursor-pointer text-ellipsis block"
                 >
                   ⚡ leads Qualificados MQL Livres
                 </button>
-                <button 
+                <button
                   onClick={() => triggerQuickQuestion("Quantos leads têm bloqueios ativos no funil?")}
                   className="w-full text-[10px] py-1.5 px-2 bg-[#0d1117] text-left text-slate-300 hover:text-white border border-slate-800 hover:border-orange-500/50 rounded transition truncate cursor-pointer text-ellipsis block"
                 >
                   ⚡ Principais Impedimentos / Bloqueios
                 </button>
-                <button 
+                <button
                   onClick={() => triggerQuickQuestion("Quais os leads com score alto e ciclo de vida frio?")}
                   className="w-full text-[10px] py-1.5 px-2 bg-[#0d1117] text-left text-slate-300 hover:text-white border border-slate-800 hover:border-orange-500/50 rounded transition truncate cursor-pointer text-ellipsis block"
                 >
                   ⚡ High Score Frios (Gargalos)
                 </button>
-                <button 
+                <button
                   onClick={() => triggerQuickQuestion("Leads com score alto e nunca receberam e-mail de marketing?")}
                   className="w-full text-[10px] py-1.5 px-2 bg-[#0d1117] text-left text-slate-300 hover:text-white border border-slate-800 hover:border-orange-500/50 rounded transition truncate cursor-pointer text-ellipsis block"
                 >
                   ⚡ High Score Sem E-mail Recebido
                 </button>
-                <button 
+                <button
                   onClick={() => triggerQuickQuestion("Leads com origem Hand Raiser ou Trial que não evoluíram?")}
                   className="w-full text-[10px] py-1.5 px-2 bg-[#0d1117] text-left text-slate-300 hover:text-white border border-slate-800 hover:border-orange-500/50 rounded transition truncate cursor-pointer text-ellipsis block"
                 >
@@ -1231,7 +1375,6 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
               </div>
             </div>
 
-            {/* Chat view terminal scroll space */}
             <div className="flex-1 bg-[#0d1117]/95 border border-slate-800 rounded-lg p-3 overflow-y-auto mb-4 font-mono text-xs flex flex-col gap-4 max-h-[360px] min-h-[220px]">
               {messages.map((msg) => {
                 const isUser = msg.sender === 'user';
@@ -1244,8 +1387,8 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                     </div>
 
                     <div className={`p-3 rounded-lg select-text leading-relaxed whitespace-pre-wrap max-w-[95%] border ${
-                      isUser 
-                        ? 'bg-slate-900 border-slate-800 text-slate-200' 
+                      isUser
+                        ? 'bg-slate-900 border-slate-800 text-slate-200'
                         : 'bg-[#161b22] border-slate-800 text-slate-150'
                     }`}>
                       {msg.text}
@@ -1267,12 +1410,11 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                   </div>
                 </div>
               )}
-              
+
               <div ref={terminalEndRef} />
             </div>
 
-            {/* Interactive console inputs */}
-            <form 
+            <form
               onSubmit={(e) => {
                 e.preventDefault();
                 handleQuery(inputCommand);
@@ -1281,14 +1423,14 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
             >
               <div className="relative flex items-center border border-slate-800 focus-within:border-orange-500 rounded-lg bg-[#0d1117] transition overflow-hidden">
                 <span className="pl-3 text-orange-500 font-mono font-bold text-xs shrink-0 select-none">&gt;&gt;</span>
-                <input 
+                <input
                   type="text"
                   placeholder="Escreva sua pergunta ou código do lead..."
                   value={inputCommand}
                   onChange={(e) => setInputCommand(e.target.value)}
                   className="w-full bg-transparent border-0 px-2 py-3 text-slate-200 focus:outline-none focus:ring-0 font-mono text-xs"
                 />
-                <button 
+                <button
                   type="submit"
                   disabled={!inputCommand.trim() || isTyping}
                   className="px-3 py-3 text-orange-500 hover:text-orange-400 disabled:text-slate-700 bg-slate-900 border-l border-slate-850 hover:bg-slate-850 transition cursor-pointer"
@@ -1300,9 +1442,14 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
               <div className="flex justify-between items-center text-[10px] font-mono text-slate-500 px-1">
                 <span className="flex items-center gap-1">
                   <Database size={10} className="text-orange-500/70" />
-                  Leads: <strong className="text-slate-400">{leads.length}</strong>
+                  Leads: <strong className="text-slate-400">{leads.length.toLocaleString('pt-BR')}</strong>
+                  {activeFileMeta && (
+                    <span className="text-slate-600 truncate max-w-[80px]" title={activeFileMeta.name}>
+                      · {activeFileMeta.name}
+                    </span>
+                  )}
                 </span>
-                
+
                 {checkingApi ? (
                   <span>verificando api...</span>
                 ) : apiKeyConfigured ? (

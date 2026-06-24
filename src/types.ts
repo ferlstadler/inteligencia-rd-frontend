@@ -93,6 +93,16 @@ export interface BaseStatsSummary {
   timestamp: string;
 }
 
+export interface FileMetadata {
+  id: string;
+  name: string;
+  uploadedAt: string;
+  rowCount: number;
+  sizeBytes: number;
+  isActive?: boolean;
+  stats?: BaseStatsSummary & { rowCount: number } | null;
+}
+
 export interface ChatMessage {
   id: string;
   sender: 'user' | 'agent';
