@@ -193,46 +193,93 @@ export default function App() {
     formData.append('csv', file);
 
     try {
-      setUploadProgress('Processando e calculando estatísticas...');
       const res = await fetch('/api/files/upload', {
         method: 'POST',
         body: formData,
       });
 
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `HTTP ${res.status}`);
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
       }
 
       const data = await res.json();
-      const newMeta: FileMetadata = { ...data.meta, isActive: true, stats: data.stats };
+      const newMeta: FileMetadata = { ...data.meta, isActive: true, stats: null };
 
-      // Add to list, mark others as inactive
       setFileList(prev => [...prev.map(f => ({ ...f, isActive: false })), newMeta]);
       setActiveFileId(data.id);
-
-      // Load stats and rows from the new file
-      if (data.stats) {
-        setStats(data.stats);
-      }
-
-      // Fetch rows for table display
-      const rowsRes = await fetch(`/api/files/${data.id}/rows?maxRows=5000`);
-      if (rowsRes.ok) {
-        const rowsData = await rowsRes.json();
-        setLeads(rowsData.leads || []);
-        setCurrentPage(1);
-      }
-
-      const rowCount = data.meta?.rowCount || 0;
-      addTerminalMessage('agent', `✅ BASE '${file.name}' CARREGADA COM SUCESSO: ${rowCount.toLocaleString('pt-BR')} leads importados. Análise completa disponível.`);
       setFileManagerOpen(true);
+
+      const sizeMB = (data.meta?.sizeBytes || 0) / 1024 / 1024;
+      addTerminalMessage('agent', `⚡ BASE '${file.name}' RECEBIDA (${sizeMB.toFixed(0)} MB). Calculando estatísticas em background...`);
+
+      // Poll for stats — backend computes them asynchronously for large files
+      let attempts = 0;
+      const maxAttempts = 120; // up to 10 min (5s interval)
+      setUploadProgress('Calculando estatísticas...');
+
+      const pollStats = async (): Promise<void> => {
+        attempts++;
+        try {
+          const statsRes = await fetch(`/api/files/${data.id}/stats`);
+          if (statsRes.ok) {
+            const statsData = await statsRes.json();
+            if (statsData && statsData.funnel) {
+              setStats(statsData);
+              setFileList(prev => prev.map(f =>
+                f.id === data.id ? { ...f, stats: statsData, rowCount: statsData.rowCount || f.rowCount } : f
+              ));
+
+              // Load rows for table
+              const rowsRes = await fetch(`/api/files/${data.id}/rows?maxRows=5000`);
+              if (rowsRes.ok) {
+                const rowsData = await rowsRes.json();
+                setLeads(rowsData.leads || []);
+                setCurrentPage(1);
+              }
+
+              const rowCount = statsData.rowCount || data.meta?.rowCount || 0;
+              addTerminalMessage('agent', `✅ ANÁLISE COMPLETA: '${file.name}' — ${rowCount.toLocaleString('pt-BR')} leads processados. Dashboard atualizado.`);
+              setIsUploading(false);
+              setUploadProgress('');
+              return;
+            }
+          }
+        } catch (_) { /* ignore poll errors */ }
+
+        if (attempts < maxAttempts) {
+          setUploadProgress(`Calculando estatísticas... (${Math.round(attempts * 5 / 60)}min)`);
+          setTimeout(pollStats, 5000);
+        } else {
+          setIsUploading(false);
+          setUploadProgress('');
+          addTerminalMessage('agent', `⚠️ Stats ainda sendo calculadas para '${file.name}'. Tente ativar o arquivo novamente em alguns minutos.`);
+        }
+      };
+
+      // Small files: stats already available immediately
+      if (data.stats && data.stats.funnel) {
+        setStats(data.stats);
+        const rowsRes = await fetch(`/api/files/${data.id}/rows?maxRows=5000`);
+        if (rowsRes.ok) {
+          const rowsData = await rowsRes.json();
+          setLeads(rowsData.leads || []);
+          setCurrentPage(1);
+        }
+        addTerminalMessage('agent', `✅ BASE '${file.name}' CARREGADA: ${(data.meta?.rowCount || 0).toLocaleString('pt-BR')} leads. Dashboard atualizado.`);
+        setIsUploading(false);
+        setUploadProgress('');
+      } else {
+        // Large file: start polling
+        setTimeout(pollStats, 3000);
+      }
+
     } catch (err: any) {
       console.error("Upload error:", err);
       addTerminalMessage('agent', `⚠️ ERRO no upload: ${err?.message || 'falha desconhecida'}`);
-    } finally {
       setIsUploading(false);
       setUploadProgress('');
+    } finally {
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
