@@ -28,8 +28,28 @@ import {
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
-import { Lead, BaseStatsSummary, ChatMessage, LifecycleStage, FileMetadata } from './types';
+import { Lead, BaseStatsSummary, ChatMessage, LifecycleStage } from './types';
 import { parseCSV, calculateStats, generateSampleCSV, checkMQL, checkBlockers, getLifecycleStage } from './utils/dataEngine';
+
+// ── Local storage key for persisting imported bases
+const LS_KEY = 'rd_bases_v2';
+
+interface SavedBase {
+  id: string;
+  name: string;
+  importedAt: string;
+  rowCount: number;
+  sizeBytes: number;
+  stats: BaseStatsSummary;
+}
+
+function loadSavedBases(): SavedBase[] {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]'); } catch { return []; }
+}
+
+function saveBases(bases: SavedBase[]) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(bases)); } catch {}
+}
 
 export default function App() {
   const [leads, setLeads] = useState<Lead[]>([]);
@@ -52,9 +72,9 @@ export default function App() {
   const [inputCommand, setInputCommand] = useState<string>('');
   const [isTyping, setIsTyping] = useState<boolean>(false);
 
-  // Multi-file management states
-  const [fileList, setFileList] = useState<FileMetadata[]>([]);
-  const [activeFileId, setActiveFileId] = useState<string | null>(null);
+  // Local base management states
+  const [savedBases, setSavedBases] = useState<SavedBase[]>([]);
+  const [activeBaseId, setActiveBaseId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');
   const [fileManagerOpen, setFileManagerOpen] = useState(false);
@@ -62,13 +82,16 @@ export default function App() {
   const terminalEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load sample database immediately on startup
+  // Load sample database and restore saved bases on startup
   useEffect(() => {
     const sample = generateSampleCSV();
     const parsed = parseCSV(sample);
     setLeads(parsed);
     const calculatedStats = calculateStats(parsed);
     setStats(calculatedStats);
+
+    // Restore saved bases from localStorage
+    setSavedBases(loadSavedBases());
 
     // Initial helpful boot messages
     const welcomeMsgs: ChatMessage[] = [
@@ -81,7 +104,7 @@ export default function App() {
       {
         id: 'bootsign-2',
         sender: 'agent',
-        text: 'Carreguei uma base de alta fidelidade com 115 contatos de lead para você explorar o Lifecycle Marketing imediatamente. Use o botão "Importar CSV" para enviar sua base real ao servidor e alternár entre múltiplas bases.',
+        text: 'Carreguei uma base de alta fidelidade com 115 contatos de lead para você explorar o Lifecycle Marketing imediatamente. Use o botão "Importar CSV" para processar sua base real localmente e alternar entre múltiplas bases.',
         timestamp: new Date().toLocaleTimeString('pt-BR')
       },
       {
@@ -93,9 +116,8 @@ export default function App() {
     ];
     setMessages(welcomeMsgs);
 
-    // Check backend config and load file list
+    // Check backend config (Gemini key only)
     checkApiStatus();
-    loadFileList();
   }, []);
 
   // Autoscroll chat terminal
@@ -109,9 +131,6 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setApiKeyConfigured(data.hasApiKey);
-        if (data.activeFileId) {
-          setActiveFileId(data.activeFileId);
-        }
       }
     } catch (e) {
       console.warn("Could not check backend API key status. Assuming fallback mode.");
@@ -120,168 +139,84 @@ export default function App() {
     }
   };
 
-  const loadFileList = async () => {
-    try {
-      const res = await fetch('/api/files');
-      if (res.ok) {
-        const data = await res.json();
-        setFileList(data.files || []);
-        setActiveFileId(data.activeFileId);
-      }
-    } catch (e) {
-      console.warn("Could not load file list from backend.");
-    }
-  };
-
-  // Switch active file: load stats and first rows
-  const switchToFile = async (id: string) => {
-    try {
-      // Activate on backend
-      await fetch(`/api/files/${id}/activate`, { method: 'PUT' });
-      setActiveFileId(id);
-
-      // Load stats
-      const statsRes = await fetch(`/api/files/${id}/stats`);
-      if (statsRes.ok) {
-        const statsData = await statsRes.json();
-        setStats(statsData);
-      }
-
-      // Load first rows for table
-      const rowsRes = await fetch(`/api/files/${id}/rows?maxRows=5000`);
-      if (rowsRes.ok) {
-        const rowsData = await rowsRes.json();
-        setLeads(rowsData.leads || []);
-        setCurrentPage(1);
-      }
-
-      // Update file list active state
-      setFileList(prev => prev.map(f => ({ ...f, isActive: f.id === id })));
-
-      const meta = fileList.find(f => f.id === id);
-      const name = meta?.name || 'base';
-      addTerminalMessage('agent', `📂 BASE ALTERNADA: '${name}' carregada com ${(meta?.rowCount || 0).toLocaleString('pt-BR')} leads. Estatísticas e tabela atualizadas.`);
-    } catch (e) {
-      console.error("Error switching file:", e);
-      addTerminalMessage('agent', '⚠️ ERRO ao alternar base. Tente novamente.');
-    }
-  };
-
-  const deleteFile = async (id: string) => {
-    const meta = fileList.find(f => f.id === id);
-    if (!window.confirm(`Remover a base '${meta?.name || id}' do servidor?`)) return;
-    try {
-      const res = await fetch(`/api/files/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        const data = await res.json();
-        setFileList(prev => prev.filter(f => f.id !== id));
-        setActiveFileId(data.activeFileId);
-        addTerminalMessage('agent', `🗑️ BASE REMOVIDA: '${meta?.name || id}' deletada do servidor.`);
-      }
-    } catch (e) {
-      console.error("Error deleting file:", e);
-    }
-  };
-
-  // Upload CSV to backend
+  // Process CSV 100% locally via FileReader
   const handleFileUpload = async (file: File) => {
     if (!file) return;
     setIsUploading(true);
-    setUploadProgress(`Enviando ${file.name}...`);
+    setUploadProgress(`Lendo ${file.name}...`);
 
-    const formData = new FormData();
-    formData.append('csv', file);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const text = e.target?.result as string;
+        setUploadProgress('Processando leads...');
 
-    try {
-      const res = await fetch('/api/files/upload', {
-        method: 'POST',
-        body: formData,
-      });
+        const parsedLeads = parseCSV(text);
+        const computedStats = calculateStats(parsedLeads);
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || `HTTP ${res.status}`);
-      }
+        const newBase: SavedBase = {
+          id: crypto.randomUUID(),
+          name: file.name,
+          importedAt: new Date().toISOString(),
+          rowCount: parsedLeads.length,
+          sizeBytes: file.size,
+          stats: computedStats,
+        };
 
-      const data = await res.json();
-      const newMeta: FileMetadata = { ...data.meta, isActive: true, stats: null };
+        const updated = [...savedBases, newBase];
+        setSavedBases(updated);
+        saveBases(updated);
 
-      setFileList(prev => [...prev.map(f => ({ ...f, isActive: false })), newMeta]);
-      setActiveFileId(data.id);
-      setFileManagerOpen(true);
+        setActiveBaseId(newBase.id);
+        setLeads(parsedLeads);
+        setStats(computedStats);
+        setCurrentPage(1);
+        setFileManagerOpen(true);
 
-      const sizeMB = (data.meta?.sizeBytes || 0) / 1024 / 1024;
-      addTerminalMessage('agent', `⚡ BASE '${file.name}' RECEBIDA (${sizeMB.toFixed(0)} MB). Calculando estatísticas em background...`);
-
-      // Poll for stats — backend computes them asynchronously for large files
-      let attempts = 0;
-      const maxAttempts = 120; // up to 10 min (5s interval)
-      setUploadProgress('Calculando estatísticas...');
-
-      const pollStats = async (): Promise<void> => {
-        attempts++;
-        try {
-          const statsRes = await fetch(`/api/files/${data.id}/stats`);
-          if (statsRes.ok) {
-            const statsData = await statsRes.json();
-            if (statsData && statsData.funnel) {
-              setStats(statsData);
-              setFileList(prev => prev.map(f =>
-                f.id === data.id ? { ...f, stats: statsData, rowCount: statsData.rowCount || f.rowCount } : f
-              ));
-
-              // Load rows for table
-              const rowsRes = await fetch(`/api/files/${data.id}/rows?maxRows=5000`);
-              if (rowsRes.ok) {
-                const rowsData = await rowsRes.json();
-                setLeads(rowsData.leads || []);
-                setCurrentPage(1);
-              }
-
-              const rowCount = statsData.rowCount || data.meta?.rowCount || 0;
-              addTerminalMessage('agent', `✅ ANÁLISE COMPLETA: '${file.name}' — ${rowCount.toLocaleString('pt-BR')} leads processados. Dashboard atualizado.`);
-              setIsUploading(false);
-              setUploadProgress('');
-              return;
-            }
-          }
-        } catch (_) { /* ignore poll errors */ }
-
-        if (attempts < maxAttempts) {
-          setUploadProgress(`Calculando estatísticas... (${Math.round(attempts * 5 / 60)}min)`);
-          setTimeout(pollStats, 5000);
-        } else {
-          setIsUploading(false);
-          setUploadProgress('');
-          addTerminalMessage('agent', `⚠️ Stats ainda sendo calculadas para '${file.name}'. Tente ativar o arquivo novamente em alguns minutos.`);
-        }
-      };
-
-      // Small files: stats already available immediately
-      if (data.stats && data.stats.funnel) {
-        setStats(data.stats);
-        const rowsRes = await fetch(`/api/files/${data.id}/rows?maxRows=5000`);
-        if (rowsRes.ok) {
-          const rowsData = await rowsRes.json();
-          setLeads(rowsData.leads || []);
-          setCurrentPage(1);
-        }
-        addTerminalMessage('agent', `✅ BASE '${file.name}' CARREGADA: ${(data.meta?.rowCount || 0).toLocaleString('pt-BR')} leads. Dashboard atualizado.`);
+        addTerminalMessage('agent', `✅ BASE '${file.name}' IMPORTADA: ${parsedLeads.length.toLocaleString('pt-BR')} leads. Dashboard atualizado.`);
+      } catch (err: any) {
+        console.error("Parse error:", err);
+        addTerminalMessage('agent', `⚠️ ERRO ao processar '${file.name}': ${err?.message || 'falha desconhecida'}`);
+      } finally {
         setIsUploading(false);
         setUploadProgress('');
-      } else {
-        // Large file: start polling
-        setTimeout(pollStats, 3000);
+        if (fileInputRef.current) fileInputRef.current.value = '';
       }
+    };
 
-    } catch (err: any) {
-      console.error("Upload error:", err);
-      addTerminalMessage('agent', `⚠️ ERRO no upload: ${err?.message || 'falha desconhecida'}`);
+    reader.onerror = () => {
+      addTerminalMessage('agent', `⚠️ ERRO ao ler o arquivo '${file.name}'.`);
       setIsUploading(false);
       setUploadProgress('');
-    } finally {
       if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
+    reader.readAsText(file);
+  };
+
+  // Switch to a previously imported base (metadata only — leads not in memory)
+  const switchToBase = (base: SavedBase) => {
+    setActiveBaseId(base.id);
+    setStats(base.stats);
+    setLeads([]);
+    addTerminalMessage('agent', `📂 BASE '${base.name}' ATIVADA — ${base.rowCount.toLocaleString('pt-BR')} leads. **Para explorar a tabela, re-importe o CSV.**`);
+  };
+
+  const deleteBase = (id: string) => {
+    const base = savedBases.find(b => b.id === id);
+    if (!window.confirm(`Remover a base '${base?.name || id}' do gerenciador?`)) return;
+
+    const updated = savedBases.filter(b => b.id !== id);
+    setSavedBases(updated);
+    saveBases(updated);
+
+    if (id === activeBaseId) {
+      setActiveBaseId(null);
+      setStats(null);
+      setLeads([]);
     }
+
+    addTerminalMessage('agent', `🗑️ BASE REMOVIDA: '${base?.name || id}' deletada do gerenciador.`);
   };
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -311,7 +246,7 @@ export default function App() {
     setMessages(prev => [...prev, newMsg]);
   };
 
-  // Run dynamic analysis (Calls Gemini API backend, and uses highly accurate local database engine statistics as backup)
+  // Run dynamic analysis (Calls Gemini API backend, uses local stats as payload)
   const handleQuery = async (promptText: string) => {
     if (!promptText.trim()) return;
 
@@ -320,7 +255,7 @@ export default function App() {
     setIsTyping(true);
 
     try {
-      // Send current stats; backend also uses active file stats as fallback
+      // Send current stats; backend uses them for Gemini context
       const statsPayload = stats ? stats : calculateStats(leads);
 
       const response = await fetch('/api/query', {
@@ -541,7 +476,7 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
     return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
   };
 
-  const activeFileMeta = fileList.find(f => f.id === activeFileId);
+  const activeBase = savedBases.find(b => b.id === activeBaseId);
 
   return (
     <div className="bg-[#0a0c10] text-slate-300 font-sans min-h-screen flex flex-col overflow-x-hidden selection:bg-orange-500/35 selection:text-white" onDragOver={handleDragOver} onDrop={handleDrop}>
@@ -586,7 +521,7 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
             className="px-3 py-1.5 bg-orange-600 hover:bg-orange-500 disabled:opacity-60 text-white rounded font-mono font-bold transition text-[11px] flex items-center gap-1.5 cursor-pointer shadow-[0_0_10px_rgba(234,88,12,0.2)]"
           >
             <Upload size={12} />
-            {isUploading ? uploadProgress || 'Enviando...' : 'Importar CSV Leads'}
+            {isUploading ? uploadProgress || 'Processando...' : 'Importar CSV Leads'}
           </button>
 
           <input
@@ -613,14 +548,14 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
           <span className="flex items-center gap-2">
             <FolderOpen size={13} className="text-orange-500/70" />
             <span className="uppercase tracking-wider font-bold">Gerenciador de Bases</span>
-            {fileList.length > 0 && (
+            {savedBases.length > 0 && (
               <span className="bg-slate-800 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded text-[10px]">
-                {fileList.length} {fileList.length === 1 ? 'base' : 'bases'}
+                {savedBases.length} {savedBases.length === 1 ? 'base' : 'bases'}
               </span>
             )}
-            {activeFileMeta && (
+            {activeBase && (
               <span className="text-slate-500 truncate max-w-[200px]">
-                — ativa: <span className="text-orange-400">{activeFileMeta.name}</span>
+                — ativa: <span className="text-orange-400">{activeBase.name}</span>
               </span>
             )}
           </span>
@@ -629,23 +564,23 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
 
         {fileManagerOpen && (
           <div className="px-6 pb-4 pt-1">
-            {fileList.length === 0 ? (
+            {savedBases.length === 0 ? (
               <p className="text-[11px] font-mono text-slate-500 py-2">
-                Nenhuma base registrada no servidor. Use "Importar CSV Leads" para enviar seu primeiro arquivo.
+                Nenhuma base importada ainda. Use "Importar CSV Leads" para processar seu primeiro arquivo localmente.
               </p>
             ) : (
               <div className="flex flex-col gap-2">
-                {fileList.map(file => (
+                {savedBases.map(base => (
                   <div
-                    key={file.id}
+                    key={base.id}
                     className={`flex items-center justify-between gap-4 px-4 py-2.5 rounded-lg border transition ${
-                      file.id === activeFileId
+                      base.id === activeBaseId
                         ? 'bg-orange-950/20 border-orange-500/30'
                         : 'bg-[#161b22] border-slate-800 hover:border-slate-700'
                     }`}
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      {file.id === activeFileId ? (
+                      {base.id === activeBaseId ? (
                         <span className="text-[9px] font-mono font-bold text-orange-400 bg-orange-950/60 border border-orange-800/50 px-1.5 py-0.5 rounded shrink-0">
                           ATIVA
                         </span>
@@ -655,29 +590,35 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                         </span>
                       )}
                       <div className="min-w-0">
-                        <div className="text-[11px] font-mono font-semibold text-slate-200 truncate max-w-[280px]" title={file.name}>
-                          {file.name}
+                        <div className="text-[11px] font-mono font-semibold text-slate-200 truncate max-w-[280px]" title={base.name}>
+                          {base.name}
                         </div>
                         <div className="text-[10px] font-mono text-slate-500 flex items-center gap-2 mt-0.5">
-                          <span>{file.rowCount.toLocaleString('pt-BR')} leads</span>
+                          <span>{base.rowCount.toLocaleString('pt-BR')} leads</span>
                           <span>·</span>
-                          <span>{formatBytes(file.sizeBytes)}</span>
+                          <span>{formatBytes(base.sizeBytes)}</span>
                           <span>·</span>
-                          <span>{new Date(file.uploadedAt).toLocaleDateString('pt-BR')}</span>
+                          <span>{new Date(base.importedAt).toLocaleDateString('pt-BR')}</span>
+                          {base.id === activeBaseId && leads.length === 0 && (
+                            <>
+                              <span>·</span>
+                              <span className="text-amber-400 font-bold">re-importar para tabela</span>
+                            </>
+                          )}
                         </div>
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      {file.id !== activeFileId && (
+                      {base.id !== activeBaseId && (
                         <button
-                          onClick={() => switchToFile(file.id)}
+                          onClick={() => switchToBase(base)}
                           className="px-2.5 py-1 text-[10px] font-mono bg-slate-900 border border-slate-700 hover:border-orange-500 hover:text-orange-400 text-slate-300 rounded transition cursor-pointer"
                         >
                           Ativar
                         </button>
                       )}
                       <button
-                        onClick={() => deleteFile(file.id)}
+                        onClick={() => deleteBase(base.id)}
                         className="p-1 text-slate-600 hover:text-red-400 transition cursor-pointer rounded"
                         title="Remover base"
                       >
@@ -1282,7 +1223,9 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                       {currentLeadsToDisplay.length === 0 ? (
                         <tr>
                           <td colSpan={8} className="p-8 text-center text-slate-500 font-mono">
-                            Nenhum lead localizado com esses filtros analíticos ativos.
+                            {leads.length === 0
+                              ? 'Nenhum lead em memória. Re-importe o CSV para explorar a tabela.'
+                              : 'Nenhum lead localizado com esses filtros analíticos ativos.'}
                           </td>
                         </tr>
                       ) : (
@@ -1490,9 +1433,9 @@ Defina um calendário quinzenal de envio de newsletter de curadoria de hacks e i
                 <span className="flex items-center gap-1">
                   <Database size={10} className="text-orange-500/70" />
                   Leads: <strong className="text-slate-400">{leads.length.toLocaleString('pt-BR')}</strong>
-                  {activeFileMeta && (
-                    <span className="text-slate-600 truncate max-w-[80px]" title={activeFileMeta.name}>
-                      · {activeFileMeta.name}
+                  {activeBase && (
+                    <span className="text-slate-600 truncate max-w-[80px]" title={activeBase.name}>
+                      · {activeBase.name}
                     </span>
                   )}
                 </span>
